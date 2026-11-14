@@ -338,6 +338,11 @@
           kv('Tracked since', row.listed_at || 'unreported'),
           kv('Tokenless age', ageText(row.age_days)),
           kv('Token', 'none recorded on DefiLlama'),
+          /* Category standing: RADAR.rows is already ranked by implied value, so filtering
+             it to this row's category keeps that order — the position in the filtered list
+             is the protocol's rank inside its own category. */
+          kv('In its category', '#' + (RADAR.rows.filter(function (r) { return (r.category || 'Other') === (row.category || 'Other'); }).findIndex(function (r) { return r.slug === row.slug; }) + 1) + ' of ' + RADAR.rows.filter(function (r) { return (r.category || 'Other') === (row.category || 'Other'); }).length + ' ' + (row.category || 'Other') + ' by implied value'),
+          kv('Board percentile', String(Math.ceil(100 * (RADAR.board_size - row.rank + 1) / RADAR.board_size)) + 'th percentile by implied value'),
           h('h3', { text: 'Its implied value', style: 'margin-top:18px' }),
           h('div', { class: 'implied-big', text: money(row.implied_value_usd) }),
           multRow('TVL base', money(row.tvl_usd), 100, null),
@@ -348,6 +353,38 @@
         h('section', { class: 'card' }, [
           h('h3', { text: 'Farm plan · ' + (row.category || 'general') + ' playbook' }),
           h('ol', { class: 'steps' }, steps.map(function (s) { return h('li', { text: s }); })),
+          /* Season budget: one planning line for the whole season, derived from the same
+             helpers the steps use — capitalBand for the working capital, gasText for the
+             per-transaction gas on the home chain, seasonBand for the season's length.
+             The transaction count follows the playbook's own pace (swaps or sessions a
+             few times a week for dex/perps, a weekly action plus setup for the rest,
+             a mostly-held position for rwa), plus two setup transactions. */
+          h('p', { class: 'note season-budget' }, [
+            h('strong', { text: 'Season budget: ' }),
+            txt((function () {
+              var chain = homeChain(row);
+              var gasNums = gasText(chain).match(/\$([0-9.]+)-\$([0-9.]+)/);
+              var gasLo = gasNums ? parseFloat(gasNums[1]) : 0.1;
+              var gasHi = gasNums ? parseFloat(gasNums[2]) : 2;
+              var season = seasonBand(row.age_days);
+              var wk = season.match(/(\d+)-(\d+)/);
+              var wkLo = wk ? parseInt(wk[1], 10) : 4;
+              var wkHi = wk ? parseInt(wk[2], 10) : 8;
+              var book = playbookFor(row.category);
+              var perWeek = book === 'dex' || book === 'perps' ? 3 : book === 'rwa' ? 1 : 2;
+              var txLo = 2 + wkLo * perWeek;
+              var txHi = 2 + wkHi * perWeek;
+              function gasMoney(v) {
+                if (v >= 100) return '$' + String(Math.round(v / 10) * 10);
+                if (v >= 10) return '$' + String(Math.round(v));
+                return '$' + v.toFixed(2).replace(/\.?0+$/, '');
+              }
+              return capitalBand(row.tvl_usd) + ' working capital, about ' +
+                gasMoney(gasLo * txLo) + '-' + gasMoney(gasHi * txHi) + ' total gas over a ' +
+                season + ' season (' + txLo + '-' + txHi + ' transactions at ' + gasText(chain) +
+                '). A planning estimate at snapshot prices, before swap or LP fees.';
+            })()),
+          ]),
           h('p', { class: 'note', text: 'Costs and times are the plan\u2019s own estimates at snapshot prices. An implied value is this board\u2019s model claim, not a promise that a token will be issued.' }),
         ]),
       ]),
