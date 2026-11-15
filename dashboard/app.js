@@ -50,6 +50,32 @@
     if (CHEAP_L2.indexOf(chain) >= 0) return 'about $0.05-$0.50 a transaction';
     return 'about $0.10-$2.00 a transaction';
   }
+  var GAS_USD_BY_CHAIN = { 'Ethereum': [8, 30], 'Solana': [0.01, 0.05], 'Bitcoin': [1, 5], 'BSC': [0.1, 0.6] };
+  function gasBand(chain) {
+    if (GAS_USD_BY_CHAIN[chain] !== undefined) return GAS_USD_BY_CHAIN[chain];
+    if (CHEAP_L2.indexOf(chain) >= 0) return [0.05, 0.5];
+    return [0.1, 2];
+  }
+  function seasonWeeks(age) {
+    if (age !== null && age !== undefined && age >= 730) return [10, 14];
+    if (age !== null && age !== undefined && age >= 365) return [8, 12];
+    if (age !== null && age !== undefined && age >= 90) return [6, 10];
+    return [4, 8];
+  }
+  function budgetMoney(v) {
+    if (v >= 100) return '$' + String(Math.round(v / 10) * 10);
+    if (v >= 10) return '$' + String(Math.round(v));
+    return '$' + v.toFixed(2).replace(/\.?0+$/, '');
+  }
+  var TX_PER_WEEK = { dex: 3, perps: 3, rwa: 1 };
+  function seasonBudget(book, chain, age) {
+    var g = gasBand(chain);
+    var wk = seasonWeeks(age);
+    var perWeek = TX_PER_WEEK[book] !== undefined ? TX_PER_WEEK[book] : 2;
+    var txLo = 2 + wk[0] * perWeek;
+    var txHi = 2 + wk[1] * perWeek;
+    return 'about ' + budgetMoney(g[0] * txLo) + '-' + budgetMoney(g[1] * txHi) + ' of gas in all (' + txLo + '-' + txHi + ' transactions on ' + chain + ' at ' + gasText(chain) + ')';
+  }
   function capitalBand(tvl) {
     if (tvl >= 250000000) return '$2,000-$5,000';
     if (tvl >= 50000000) return '$1,000-$2,500';
@@ -121,7 +147,7 @@
       middle[0],
       middle[1],
       `Do one small transaction on ${c.name} every week of the season, on different days, and screenshot your balance monthly with the date visible. Consistency across ${c.season} is what most points and snapshot systems weight highest, ahead of size.`,
-      `Watch ${c.name}'s official channels for a token or points announcement and claim only from a link the project itself posts. Keep total costs (gas plus fees) under 2% of your position; if no announcement comes by the season's end, withdraw on ${c.chain} rather than rolling into a second season blind.`,
+      `Budget the season at ${seasonBudget(book, chain, p.age_days)}, on top of the ${c.capital} working position, which stays yours. Watch ${c.name}'s official channels for a token or points announcement and claim only from a link the project itself posts; if no announcement comes by the season's end, withdraw on ${c.chain} rather than rolling into a second season blind.`,
     ];
   }
 
@@ -176,20 +202,20 @@
         h('div', { class: 'stat' }, [h('span', { class: 'num', text: String(RADAR.board_size) }), h('span', { class: 'lbl', text: 'pre-token protocols ranked' })]),
         h('div', { class: 'stat' }, [h('span', { class: 'num', text: String(RADAR.watchlist_size) + '/' + String(RADAR.watchlist_size) }), h('span', { class: 'lbl', text: 'watchlist covered' })]),
         h('div', { class: 'stat' }, [h('span', { class: 'num', text: money(totalTvl) }), h('span', { class: 'lbl', text: 'TVL under watch' })]),
-        h('div', { class: 'stat' }, [h('span', { class: 'num', text: String(RADAR.live_size) }), h('span', { class: 'lbl', text: 'live tokens set aside' })]),
+        h('div', { class: 'stat' }, [h('span', { class: 'num', text: String(RADAR.traded_size) }), h('span', { class: 'lbl', text: 'live tokens set aside' })]),
       ]),
     ]));
   }
   function modelPanel() {
-    var mults = Object.keys(RADAR.category_multiple).sort().map(function (k) {
-      return h('span', {}, [h('b', { text: k }), txt(' ×' + RADAR.category_multiple[k].toFixed(2))]);
+    var mults = RADAR.category_model.map(function (m) {
+      var ev = m.peers > 0 ? ' · ' + m.peers + ' traded peers, median ×' + m.observed.toFixed(2) : ' · no traded peer, snapshot median';
+      return h('span', {}, [h('b', { text: m.category || 'Uncategorised' }), txt(' ×' + m.multiple.toFixed(2) + ev)]);
     });
-    mults.push(h('span', {}, [h('b', { text: 'anything else' }), txt(' ×' + RADAR.default_multiple.toFixed(2))]));
     return h('section', { class: 'model' }, [
       h('h2', { text: 'How a launch gets its price' }),
       h('p', { text: 'An implied value is a claim about one number: the fully diluted value a token would carry if the protocol issued one at its snapshot size. One function prices every row, from the snapshot figures alone — no name is special-cased and no row is hand-picked.' }),
       h('div', { class: 'formula', text: 'implied value  =  TVL  ×  category multiple  ×  growth multiple  ×  maturity multiple' }),
-      h('p', { text: 'Growth: the 7-day TVL change, clamped to [-50%, +60%], at weight 0.6. Maturity: ×0.70 at listing rising to ×1.20 over four tokenless years (an unreported listing date counts as 300 days). Category multiples — the share of each TVL dollar a launch has historically captured, by business model:' }),
+      h('p', { text: 'The category multiple is measured, not asserted: for each category, the model reads the protocols in this snapshot whose token already trades, takes the median of market cap over TVL — the share of a TVL dollar a launched token in that line of business actually captured — and blends it toward the snapshot-wide median (×' + RADAR.global_multiple.toFixed(2) + ' across ' + RADAR.global_peers + ' traded protocols) by peer count, so a thin category borrows from the whole market and a deep one speaks for itself. Each peer\u2019s ratio is read inside [0.02, 2.5] first, so one entry whose token prices a whole ecosystem on a sliver of recorded TVL cannot price a category. Growth: the 7-day TVL change, clamped to [-50%, +60%], at weight 0.6. Maturity: ×0.70 at listing rising to ×1.20 over four tokenless years (an unreported listing date counts as 300 days). The measured table, strongest first:' }),
       h('div', { class: 'mults' }, mults),
     ]);
   }
@@ -300,7 +326,7 @@
       ]);
     }));
     return h('div', {}, [
-      h('p', { class: 'lede', text: 'These already trade, so they are never ranked: the market has priced them. They are the comparison set — what a launched protocol of a given size is actually worth today.' }),
+      h('p', { class: 'lede', text: 'These already trade, so they are never ranked: the market has priced them. ' + RADAR.traded_size + ' protocols in the snapshot record a token; the 60 largest by market cap are shown. They are the comparison set — what a launched protocol of a given size is actually worth today, and the evidence the category multiples are measured from.' }),
       h('table', { class: 'board' }, [
         h('thead', {}, [h('tr', {}, [h('th', { text: 'Protocol' }), h('th', { text: 'Category' }), h('th', { text: 'Chains' }), h('th', { class: 'num', text: 'TVL' }), h('th', { class: 'num', text: '7d' }), h('th', { class: 'num', text: 'Market cap' })])]),
         tbody,
@@ -346,7 +372,7 @@
           h('h3', { text: 'Its implied value', style: 'margin-top:18px' }),
           h('div', { class: 'implied-big', text: money(row.implied_value_usd) }),
           multRow('TVL base', money(row.tvl_usd), 100, null),
-          multRow('Category multiple (' + (row.category || 'Other') + ')', '×' + row.category_multiple.toFixed(2), Math.round(row.category_multiple / 0.6 * 100), null),
+          multRow('Category multiple (' + (row.category || 'Other') + ')', '×' + row.category_multiple.toFixed(2), Math.min(100, Math.round(row.category_multiple / 0.8 * 100)), row.category_peers > 0 ? 'measured on this snapshot: median mcap/TVL ×' + row.category_observed.toFixed(2) + ' across ' + row.category_peers + ' traded peers, blended toward the snapshot median ×' + RADAR.global_multiple.toFixed(2) : 'no traded peer in this category on the snapshot: priced at the snapshot median ×' + RADAR.global_multiple.toFixed(2)),
           multRow('Growth multiple', '×' + row.growth_multiple.toFixed(2), Math.round(row.growth_multiple / 1.36 * 100), '7-day change ' + pct(row.change_7d) + ', clamped and weighted 0.6'),
           multRow('Maturity multiple', '×' + row.maturity_multiple.toFixed(2), Math.round((row.maturity_multiple - 0.7) / 0.5 * 100), ageText(row.age_days) + ' with no token, on the 0.70 → 1.20 curve'),
         ]),

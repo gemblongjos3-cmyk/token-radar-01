@@ -15,10 +15,17 @@ implied value = TVL × category multiple × growth multiple × maturity multiple
 
 The three multipliers:
 
-- **Category** — the share of each TVL dollar a launch's fully diluted value has
-  historically captured for that kind of business. Lending ×0.55, CDP ×0.50, Dexs ×0.40,
-  Bridge ×0.22, anything unnamed ×0.30; the full table lives in `lib/model.ts` and is
-  printed on the page itself, so a reader can argue with it.
+- **Category** — measured on the snapshot itself (the radar-4 change). For each category,
+  the model reads the protocols in the same snapshot whose token already trades, takes
+  the median of market cap ÷ TVL — the share of each TVL dollar a launched token in that
+  line of business actually captured — and blends it toward the snapshot-wide median
+  (×0.20 across 129 traded protocols) by peer count, so a category with two traded peers
+  borrows most of its multiple from the whole market and one with fifteen mostly speaks
+  for itself. A category with no traded peer prices at the snapshot-wide median. Each
+  peer's ratio is read inside [0.02, 2.5] first, so one entry whose token prices a whole
+  ecosystem on a sliver of recorded TVL cannot price a category. No multiple is a
+  constant anyone asserted: recompute it from the snapshot and you get the same table,
+  which the dashboard prints in full, peer counts included.
 - **Growth** — the 7-day TVL change, clamped to [-50%, +60%], at weight 0.6.
 - **Maturity** — ×0.70 when first listed, rising to ×1.20 after four tokenless years
   (a missing listing date counts as 300 days).
@@ -26,7 +33,8 @@ The three multipliers:
 Wrapped, staked and bridged products of tokens that already trade — WBTC, USDT0,
 staked-ETH wrappers — are never ranked. They move an existing asset along; they are not
 launches still to come. Protocols whose token already trades appear separately, in the
-dashboard's Live tokens view, at the market's own values.
+dashboard's Live tokens view, at the market's own values: 416 of them on this snapshot,
+and they double as the evidence the category multiples are measured from.
 
 ## Files
 
@@ -34,14 +42,14 @@ dashboard's Live tokens view, at the market's own values.
   `/output/board.json` and `/output/data.js`, copies `dashboard/` and `screenshots/` into
   `/output`, and writes `/output/dossier.json` through `buildDossier`. Deterministic:
   the same snapshot in, the same bytes out, on every run.
-- `lib/model.ts` — the scoring model (radar-3), the board builder, the category farm
+- `lib/model.ts` — the scoring model (radar-4), the board builder, the category farm
   playbooks and a self-check shaped like the gate.
 - `vendor/makefun-board.ts` — the kit's dossier library, vendored unchanged.
 - `dashboard/` — a static page (no network, no framework). The ranked board with search,
   category/chain/watchlist filters and sortable columns; a detail view per protocol with
   its model arithmetic and a five-step farm plan; and the live-token comparison view.
-- `screenshots/` — the board, a protocol detail view (Bittensor dTAO) and a filtered
-  view (Dexs), rendered from this dashboard at 1440×900.
+- `screenshots/` — the board, a protocol detail view and a filtered view (Dexs),
+  rendered from this dashboard at 1440×900.
 
 ## Run it
 
@@ -51,5 +59,6 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <path-to-snapshot.js
 
 Each farm plan is generated per protocol from its category's playbook and filled with the
 protocol's own name, main chain, size and age; every step states what to do, what it
-costs and how long it takes. Implied values are this board's own model claims, not
-predictions that any token will be issued.
+costs and how long it takes, and the closing step states the season's whole gas budget
+up front. Implied values are this board's own model claims, not predictions that any
+token will be issued.

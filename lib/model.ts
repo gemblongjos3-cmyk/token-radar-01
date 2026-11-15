@@ -1,4 +1,4 @@
-// Token Launch Radar — the scoring model, rebuilt as radar-3.
+// Token Launch Radar — the scoring model, rebuilt as radar-4.
 //
 // One sealed DefiLlama snapshot goes in; one ranked board comes out. The board covers every
 // protocol the snapshot records without a token: the full watchlist first (a floor the model
@@ -11,10 +11,16 @@
 //
 //   implied value = TVL x category multiple x growth multiple x maturity multiple
 //
-// - The category multiple prices how much of each TVL dollar a launch's fully diluted value
-//   has historically captured for that line of business. A lending market collects fees on
-//   every dollar it holds; a bridge mostly passes dollars along. The table is stated below,
-//   in the open, so a reader can argue with it.
+// - The category multiple is MEASURED, not asserted (the radar-4 change). For each category
+//   the model reads the protocols in this same snapshot whose token already trades, takes
+//   the median of market cap over TVL — the share of each TVL dollar a launched token in
+//   that line of business actually captured — and blends it toward the snapshot-wide median
+//   by peer count, so a category with two traded peers borrows most of its multiple from
+//   the whole market and one with fifteen mostly speaks for itself. Each peer's ratio is
+//   read inside [0.02, 2.5] first, so one entry whose token prices a whole ecosystem on a
+//   sliver of recorded TVL cannot price a category. A category with no traded peer in the
+//   snapshot prices at the snapshot-wide median. Nothing in the table is a constant anyone
+//   chose: recompute it from the snapshot and you get the same numbers.
 // - The growth multiple reads the seven-day TVL change, in per cent and clamped to
 //   [-50, +60], at a weight of 0.6. TVL flowing in ahead of a launch prices higher; TVL
 //   bleeding out prices lower.
@@ -50,35 +56,99 @@ export interface SealedSnapshot {
 }
 
 /** This build's model label: the board and the dashboard both carry it. */
-export const MODEL_TAG = 'radar-3';
+export const MODEL_TAG = 'radar-4';
 
-/** Category pricing as a pair table, in descending multiple order; turned into a record below. */
-const CATEGORY_PRICING: ReadonlyArray<readonly [string, number]> = [
-  ['Chain', 0.6],
-  ['Lending', 0.55],
-  ['CDP', 0.5],
-  ['Derivatives', 0.45],
-  ['Dexs', 0.4],
-  ['Risk Curators', 0.38],
-  ['Onchain Capital Allocator', 0.38],
-  ['RWA', 0.35],
-  ['Payments', 0.35],
-  ['Yield Aggregator', 0.32],
-  ['Yield', 0.3],
-  ['Basis Trading', 0.3],
-  ['Liquid Restaking', 0.3],
-  ['Leveraged Farming', 0.28],
-  ['Liquid Staking', 0.28],
-  ['Staking Pool', 0.25],
-  ['Bridge', 0.22],
-  ['Canonical Bridge', 0.2],
-];
+/**
+ * How hard a category's own traded peers pull its multiple away from the snapshot-wide
+ * median: the blend is (peers x observed + SHRINKAGE x global) / (peers + SHRINKAGE), so
+ * eight phantom peers at the global median stand behind every category's own evidence.
+ */
+export const PEER_SHRINKAGE = 8;
 
-/** The category table as a record, for the board's model block and the dashboard's panel. */
-export const CATEGORY_MULTIPLE: Record<string, number> = Object.fromEntries(CATEGORY_PRICING);
+/** The band a derived multiple is kept inside, whatever the peers say. */
+export const MULTIPLE_FLOOR = 0.05;
+export const MULTIPLE_CAP = 1.0;
 
-/** What a category the table never names still gets. */
-export const FALLBACK_MULTIPLE = 0.3;
+/** One category's measured pricing: how many traded peers spoke, what they said, what is used. */
+export interface CategoryModel {
+  category: string | null;
+  /** Traded protocols in this category with a recorded market cap, counted on the snapshot. */
+  peers: number;
+  /** Their median market cap over TVL, or null when the category has no traded peer. */
+  observed: number | null;
+  /** The multiple rows in this category are priced with: observed blended toward the global. */
+  multiple: number;
+}
+
+/** The whole measured table: the snapshot-wide median and every category's line in it. */
+export interface MultipleTable {
+  /** Median market cap over TVL across every traded protocol in the snapshot. */
+  global: number;
+  /** How many traded protocols that median stands on. */
+  globalPeers: number;
+  byCategory: Map<string, CategoryModel>;
+}
+
+/** The median of a non-empty list: the middle value, or the mean of the two middle ones. */
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** The band one peer's ratio is read inside before it may speak for its category. */
+export const RATIO_FLOOR = 0.02;
+export const RATIO_CAP = 2.5;
+
+/**
+ * Measure the category multiples from the snapshot itself. A traded peer is a protocol the
+ * snapshot records WITH a token and a market cap: its market cap over its TVL is what a
+ * launched token in its line of business actually captured per TVL dollar. Each peer's
+ * ratio is first read inside [RATIO_FLOOR, RATIO_CAP]: the snapshot carries entries whose
+ * token prices a whole ecosystem while the entry's TVL names one pool of it (a V2 pool
+ * carrying its protocol's whole market cap, a token-first project with a sliver of TVL),
+ * and one such entry must not be allowed to price a category. Categories are keyed by
+ * their DefiLlama name, a missing category under the empty key.
+ */
+export function deriveMultiples(snapshot: SealedSnapshot): MultipleTable {
+  const ratiosByCategory = new Map<string, number[]>();
+  const allRatios: number[] = [];
+  for (const p of snapshot.protocols) {
+    if (hasNoToken(p)) continue;
+    if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) continue;
+    const ratio = Math.min(RATIO_CAP, Math.max(RATIO_FLOOR, p.mcap_usd / p.tvl_usd));
+    allRatios.push(ratio);
+    const key = p.category ?? '';
+    const list = ratiosByCategory.get(key);
+    if (list === undefined) ratiosByCategory.set(key, [ratio]);
+    else list.push(ratio);
+  }
+  const global = allRatios.length > 0 ? medianOf(allRatios) : 0.2;
+  const byCategory = new Map<string, CategoryModel>();
+  const categories = new Set<string>();
+  for (const p of snapshot.protocols) categories.add(p.category ?? '');
+  for (const key of categories) {
+    const ratios = ratiosByCategory.get(key) ?? [];
+    if (ratios.length === 0) {
+      byCategory.set(key, { category: key === '' ? null : key, peers: 0, observed: null, multiple: global });
+      continue;
+    }
+    const observed = medianOf(ratios);
+    const blended = (ratios.length * observed + PEER_SHRINKAGE * global) / (ratios.length + PEER_SHRINKAGE);
+    byCategory.set(key, {
+      category: key === '' ? null : key,
+      peers: ratios.length,
+      observed,
+      multiple: Math.min(MULTIPLE_CAP, Math.max(MULTIPLE_FLOOR, blended)),
+    });
+  }
+  return { global, globalPeers: allRatios.length, byCategory };
+}
+
+/** The measured line for one category: its blended multiple and the evidence behind it. */
+export function multipleForCategory(table: MultipleTable, category: string | null): CategoryModel {
+  return table.byCategory.get(category ?? '') ?? { category, peers: 0, observed: null, multiple: table.global };
+}
 
 /** The growth reading: clamp the 7-day change to this band (per cent), then weight it this much. */
 export const GROWTH_LOW_PCT = -50;
@@ -111,6 +181,8 @@ export interface RankedRow {
   implied_value_usd: number;
   model: {
     category_multiple: number;
+    category_peers: number;
+    category_observed: number | null;
     growth_pct: number;
     growth_multiple: number;
     maturity_multiple: number;
@@ -132,6 +204,8 @@ export interface DashboardRow {
   watchlist: boolean;
   implied_value_usd: number;
   category_multiple: number;
+  category_peers: number;
+  category_observed: number | null;
   growth_multiple: number;
   maturity_multiple: number;
 }
@@ -157,8 +231,13 @@ export interface DashboardData {
   watchlist_size: number;
   board_size: number;
   live_size: number;
-  category_multiple: Record<string, number>;
-  default_multiple: number;
+  /** Every protocol in the snapshot that records a token already: the separated set. */
+  traded_size: number;
+  /** The measured multiples for the categories the board carries, strongest first. */
+  category_model: CategoryModel[];
+  /** The snapshot-wide median multiple and the traded peers it stands on. */
+  global_multiple: number;
+  global_peers: number;
   rows: DashboardRow[];
   live: TradedRow[];
 }
@@ -190,15 +269,11 @@ export function tokenlessAge(asOf: string, listedAt: string | null): number | nu
   return Math.max(0, Math.floor((end - start) / MS_PER_DAY));
 }
 
-/** The category multiple one protocol gets: its named row, or the fallback when unnamed. */
-export function multipleForCategory(category: string | null): number {
-  if (category === null) return FALLBACK_MULTIPLE;
-  return CATEGORY_MULTIPLE[category] ?? FALLBACK_MULTIPLE;
-}
-
 export interface PricedProtocol {
   value: number;
   cat: number;
+  catPeers: number;
+  catObserved: number | null;
   growthPct: number;
   growth: number;
   maturity: number;
@@ -206,15 +281,16 @@ export interface PricedProtocol {
 }
 
 /** The three multipliers and the implied value one protocol gets under this model. */
-export function priceOne(protocol: ProtocolRecord, asOf: string): PricedProtocol {
+export function priceOne(protocol: ProtocolRecord, asOf: string, table: MultipleTable): PricedProtocol {
   const age = tokenlessAge(asOf, protocol.listed_at);
-  const cat = multipleForCategory(protocol.category);
+  const line = multipleForCategory(table, protocol.category);
+  const cat = line.multiple;
   const growthPct = Math.min(GROWTH_HIGH_PCT, Math.max(GROWTH_LOW_PCT, numOr(protocol.change_7d, 0)));
   const growth = 1 + (growthPct / 100) * GROWTH_SLOPE;
   const aged = age ?? ASSUMED_AGE_DAYS;
   const maturity = MATURITY_BASE + (Math.min(Math.max(aged, 0), MATURITY_SPAN_DAYS) / MATURITY_SPAN_DAYS) * MATURITY_SPAN;
   const value = Math.max(1, Math.round(protocol.tvl_usd * cat * growth * maturity));
-  return { value, cat, growthPct, growth, maturity, age };
+  return { value, cat, catPeers: line.peers, catObserved: line.observed, growthPct, growth, maturity, age };
 }
 
 /** Whether a protocol's record carries no token at all. */
@@ -271,6 +347,7 @@ interface PlanContext {
   gas: string;
   capital: string;
   season: string;
+  budget: string;
 }
 
 /** The protocol's first named chain, or a plain fallback for the plan's wording. */
@@ -295,6 +372,27 @@ function gasText(chain: string): string {
   return 'about $0.10-$2.00 a transaction';
 }
 
+/** The same gas bands as numbers, for the season budget line: [low, high] dollars a transaction. */
+const GAS_USD_BY_CHAIN: Record<string, readonly [number, number]> = {
+  'Ethereum': [8, 30],
+  'Solana': [0.01, 0.05],
+  'Bitcoin': [1, 5],
+  'BSC': [0.1, 0.6],
+};
+
+function gasBand(chain: string): readonly [number, number] {
+  if (GAS_USD_BY_CHAIN[chain] !== undefined) return GAS_USD_BY_CHAIN[chain]!;
+  if (CHEAP_L2_CHAINS.includes(chain)) return [0.05, 0.5];
+  return [0.1, 2];
+}
+
+/** A budget figure in the plan's plain wording: tens rounded at $100+, cents only when small. */
+function budgetMoney(v: number): string {
+  if (v >= 100) return `$${Math.round(v / 10) * 10}`;
+  if (v >= 10) return `$${Math.round(v)}`;
+  return `$${v.toFixed(2).replace(/\.?0+$/, '')}`;
+}
+
 /** Working-capital bands, sized to the protocol's own TVL: [minimum TVL, suggested range]. */
 const CAPITAL_BANDS: ReadonlyArray<readonly [number, string]> = [
   [250_000_000, '$2,000-$5,000'],
@@ -310,19 +408,40 @@ function capitalBand(tvl: number): string {
   return '$100-$400';
 }
 
-/** Season lengths by how long the protocol has already run with no token. */
-const SEASON_BANDS: ReadonlyArray<readonly [number, string]> = [
-  [730, '10-14 weeks'],
-  [365, '8-12 weeks'],
-  [90, '6-10 weeks'],
+/** Season lengths in weeks by how long the protocol has already run with no token. */
+const SEASON_WEEKS: ReadonlyArray<readonly [number, readonly [number, number]]> = [
+  [730, [10, 14]],
+  [365, [8, 12]],
+  [90, [6, 10]],
 ];
 
-function seasonBand(age: number | null): string {
-  if (age === null) return '4-8 weeks';
-  for (const [floor, season] of SEASON_BANDS) {
-    if (age >= floor) return season;
+function seasonWeeks(age: number | null): readonly [number, number] {
+  if (age === null) return [4, 8];
+  for (const [floor, weeks] of SEASON_WEEKS) {
+    if (age >= floor) return weeks;
   }
-  return '4-8 weeks';
+  return [4, 8];
+}
+
+function seasonBand(age: number | null): string {
+  const [lo, hi] = seasonWeeks(age);
+  return `${lo}-${hi} weeks`;
+}
+
+/** Transactions a week each playbook's pace implies, for the season budget line. */
+const TX_PER_WEEK: Record<string, number> = { dex: 3, perps: 3, rwa: 1 };
+
+/**
+ * The season's whole gas bill, stated before a reader starts: two setup transactions plus
+ * the playbook's weekly pace across the season, at the home chain's gas band.
+ */
+function seasonBudget(book: string, chain: string, age: number | null): string {
+  const [gasLo, gasHi] = gasBand(chain);
+  const [wkLo, wkHi] = seasonWeeks(age);
+  const perWeek = TX_PER_WEEK[book] ?? 2;
+  const txLo = 2 + wkLo * perWeek;
+  const txHi = 2 + wkHi * perWeek;
+  return `about ${budgetMoney(gasLo * txLo)}-${budgetMoney(gasHi * txHi)} of gas in all (${txLo}-${txHi} transactions on ${chain} at ${gasText(chain)})`;
 }
 
 /** Which playbook a category farms by. */
@@ -408,20 +527,22 @@ function playbookSteps(book: string, c: PlanContext): [string, string] {
  * what to do, what it costs and how long it takes.
  */
 export function planFor(p: ProtocolRecord, age: number | null): string[] {
+  const book = playbookFor(p.category);
   const ctx: PlanContext = {
     name: p.name,
     chain: homeChain(p),
     gas: gasText(homeChain(p)),
     capital: capitalBand(p.tvl_usd),
     season: seasonBand(age),
+    budget: seasonBudget(book, homeChain(p), age),
   };
-  const [middleA, middleB] = playbookSteps(playbookFor(p.category), ctx);
+  const [middleA, middleB] = playbookSteps(book, ctx);
   return [
     `Open ${ctx.name}'s official app (reach it from its DefiLlama page, never a search ad) and connect a fresh wallet on ${ctx.chain}. Setup takes about 15 minutes and one or two transactions; gas on ${ctx.chain} runs ${ctx.gas}. Work with ${ctx.capital} for the season.`,
     middleA,
     middleB,
     `Do one small transaction on ${ctx.name} every week of the season, on different days, and screenshot your balance monthly with the date visible. Consistency across ${ctx.season} is what most points and snapshot systems weight highest, ahead of size.`,
-    `Watch ${ctx.name}'s official channels for a token or points announcement and claim only from a link the project itself posts. Keep total costs (gas plus fees) under 2% of your position; if no announcement comes by the season's end, withdraw on ${ctx.chain} rather than rolling into a second season blind.`,
+    `Budget the season at ${ctx.budget}, on top of the ${ctx.capital} working position, which stays yours. Watch ${ctx.name}'s official channels for a token or points announcement and claim only from a link the project itself posts; if no announcement comes by the season's end, withdraw on ${ctx.chain} rather than rolling into a second season blind.`,
   ];
 }
 
@@ -455,7 +576,8 @@ export function rankBoard(snapshot: SealedSnapshot): RankedRow[] {
   for (const p of snapshot.protocols) {
     if (!chosen.has(p.slug) && boardEligible(p)) chosen.set(p.slug, p);
   }
-  const scored = [...chosen.values()].map((p) => ({ p, priced: priceOne(p, snapshot.as_of) }));
+  const table = deriveMultiples(snapshot);
+  const scored = [...chosen.values()].map((p) => ({ p, priced: priceOne(p, snapshot.as_of, table) }));
   scored.sort(compareScored);
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -471,6 +593,8 @@ export function rankBoard(snapshot: SealedSnapshot): RankedRow[] {
     implied_value_usd: s.priced.value,
     model: {
       category_multiple: s.priced.cat,
+      category_peers: s.priced.catPeers,
+      category_observed: s.priced.catObserved,
       growth_pct: roundTo4(s.priced.growthPct),
       growth_multiple: roundTo4(s.priced.growth),
       maturity_multiple: roundTo4(s.priced.maturity),
@@ -503,6 +627,11 @@ export function tradedTable(snapshot: SealedSnapshot): TradedRow[] {
 export function scoreSnapshot(snapshot: SealedSnapshot): { board: RankedRow[]; radar: DashboardData } {
   const board = rankBoard(snapshot);
   const live = tradedTable(snapshot);
+  const table = deriveMultiples(snapshot);
+  const boardCategories = new Set(board.map((r) => r.category ?? ''));
+  const categoryModel = [...table.byCategory.values()]
+    .filter((line) => boardCategories.has(line.category ?? ''))
+    .sort((a, b) => b.multiple - a.multiple || (a.category ?? '').localeCompare(b.category ?? ''));
   const radar: DashboardData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -511,8 +640,10 @@ export function scoreSnapshot(snapshot: SealedSnapshot): { board: RankedRow[]; r
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     live_size: live.length,
-    category_multiple: CATEGORY_MULTIPLE,
-    default_multiple: FALLBACK_MULTIPLE,
+    traded_size: snapshot.protocols.filter((p) => !hasNoToken(p)).length,
+    category_model: categoryModel,
+    global_multiple: table.global,
+    global_peers: table.globalPeers,
     rows: board.map((r) => ({
       rank: r.rank,
       slug: r.slug,
@@ -526,6 +657,8 @@ export function scoreSnapshot(snapshot: SealedSnapshot): { board: RankedRow[]; r
       watchlist: r.watchlist,
       implied_value_usd: r.implied_value_usd,
       category_multiple: r.model.category_multiple,
+      category_peers: r.model.category_peers,
+      category_observed: r.model.category_observed,
       growth_multiple: r.model.growth_multiple,
       maturity_multiple: r.model.maturity_multiple,
     })),
